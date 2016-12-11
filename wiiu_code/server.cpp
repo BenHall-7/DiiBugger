@@ -66,6 +66,7 @@ extern int (* const entryPoint)(int argc, char *argv[]);
 #define SERVER_MESSAGE_CLOSE_FILE 6
 #define SERVER_MESSAGE_SET_POS_FILE 7
 #define SERVER_MESSAGE_GET_STAT_FILE 8
+#define SERVER_MESSAGE_WRITE_FILE 9
 
 #define CLIENT_MESSAGE_CONTINUE 0
 #define CLIENT_MESSAGE_STEP 1
@@ -159,6 +160,9 @@ struct globals {
     Declare(FSReadDir)
     Declare(FSCloseDir)
 
+    Declare(SAVEInit)
+    Declare(SAVEOpenFile)
+
     Declare(SOInit)
     Declare(SOSocket)
     Declare(SOSetSockOpt)
@@ -172,6 +176,11 @@ struct globals {
     Declare(SOLastError)
 
     Declare(VPADRead)
+
+    Declare(nn_act_Initialize)
+    Declare(nn_act_Finalize)
+    Declare(nn_act_GetSlotNo)
+    Declare(nn_act_GetPersistentIdEx)
 };
 
 void sendall(int fd, void *data, int length) {
@@ -258,6 +267,52 @@ bool IsServerFile(const char *path) {
     return false;
 }
 
+void CheckFileHandle() {
+    if (GLOBALS->fileHandle != 0) {
+        GLOBALS->OSFatal("The game tried to open two patched files at the same time.\n"
+                   "However, the current debugger implementation only allows\n"
+                   "one patched file to be opened at once.");
+    }
+}
+
+void OpenServerFile(const char *path, const char *mode, int *handle) {
+    globals *a = GLOBALS;
+    CheckFileHandle();
+
+    OSMessage message;
+    message.message = SERVER_MESSAGE_OPEN_FILE;
+    message.data0 = (u32)path;
+    message.data1 = strlen(path);
+    message.data2 = *(u16 *)mode; //A bit of a hack
+    a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
+    a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+    *handle = message.data0;
+    a->fileHandle = message.data0;
+}
+
+u32 GetPersistentId(u8 slot) {
+    GLOBALS->nn_act_Initialize();
+    u32 id = GLOBALS->nn_act_GetPersistentIdEx(slot);
+    GLOBALS->nn_act_Finalize();
+    return id;
+}
+
+int OpenSaveFile(FSClient *client, u8 account, const char *path, const char *mode, int *handle) {
+    globals *a = GLOBALS;
+    if (client == &a->fileClient) return -1;
+
+    char newPath[640] = {0};
+    if (account == 255) {
+        a->__os_snprintf(newPath, 640, "/vol/save/common/%s", path);
+    }
+    else {
+        a->__os_snprintf(newPath, 640, "/vol/save/%08X/%s", GetPersistentId(account), path);
+    }
+    if (!(IsServerFile(newPath) || mode[0] == 'w')) return -1;
+    OpenServerFile(newPath, mode, handle);
+    return 0;
+}
+
 extern "C" {
 
     int Patch_FSGetStat(FSClient *client, FSCmdBlock *block, const char *path, FSStat *stat, int errHandling) {
@@ -277,23 +332,20 @@ extern "C" {
 
     int Patch_FSOpenFile(FSClient *client, FSCmdBlock *block, const char *path, const char *mode, int *handle, int errHandling) {
         INIT_FS_PATCH
-        if (!IsServerFile(path)) return -1;
-        if (a->fileHandle != 0) {
-            a->OSFatal("The game tried to open two patched files at the same time.\n"
-                       "However, the current debugger implementation only allows\n"
-                       "one patched file to be opened at once.");
-        }
-
-        OSMessage message;
-        message.message = SERVER_MESSAGE_OPEN_FILE;
-        message.data0 = (u32)path;
-        message.data1 = strlen(path);
-        message.data2 = *(u32 *)mode; //A bit of a hack
-        a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
-        a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
-        *handle = message.data0;
-        a->fileHandle = message.data0;
+        if (!(IsServerFile(path) || mode[0] == 'w')) return -1;
+        OpenServerFile(path, mode, handle);
         return 0;
+    }
+
+    u32 Patch_SAVEOpenFile(FSClient *client, FSCmdBlock *block, u8 account, const char *path, const char *mode, int *handle, int errHandling) {
+        //The globals pointer is always initialized here, because we're not
+        //patching SAVEOpenFile with the installer but when a game is launched
+        globals *a = GLOBALS;
+        int result = OpenSaveFile(client, account, path, mode, handle);
+        if (result == -1) {
+            return (u32)a->SAVEOpenFile + 0x2C;
+        }
+        return (u32)a->SAVEOpenFile + 0x1E8;
     }
 
     int Patch_FSReadFile(FSClient *client, FSCmdBlock *block, void *buffer, u32 size, u32 count, int handle, u32 flags, int errHandling) {
@@ -304,6 +356,20 @@ extern "C" {
         OSMessage message;
         message.message = SERVER_MESSAGE_READ_FILE;
         message.data0 = (u32)readArgs;
+        message.data1 = 0x10;
+        a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
+        a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+        return message.data0;
+    }
+
+    int Patch_FSWriteFile(FSClient *client, FSCmdBlock *block, void *buffer, u32 size, u32 count, int handle, u32 flags, int errHandling) {
+        INIT_FS_PATCH
+        if (handle != a->fileHandle) return -1;
+
+        u32 writeArgs[] = {(u32)buffer, size, count, handle};
+        OSMessage message;
+        message.message = SERVER_MESSAGE_WRITE_FILE;
+        message.data0 = (u32)writeArgs;
         message.data1 = 0x10;
         a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
         a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
@@ -654,8 +720,8 @@ breakpoint *GetBreakPointRange(u32 addr, u32 num, breakpoint *prev) {
     return 0;
 }
 
-int RPCServer(int intArg, void *ptrArg) {
-    globals *a = (globals *)ptrArg;
+int RPCServer(int argc, void *argv) {
+    globals *a = GLOBALS;
 
     a->OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_THREAD, OS_EXCEPTION_DSI, DSIHandler_Fatal);
     a->OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_THREAD, OS_EXCEPTION_ISI, ISIHandler_Fatal);
@@ -954,6 +1020,14 @@ int RPCServer(int intArg, void *ptrArg) {
                     a->patchFiles = 0;
                 }
             }
+
+            else if (cmd == 17) { //Get persistent id
+                a->nn_act_Initialize();
+                u8 slot = a->nn_act_GetSlotNo();
+                u32 persistentId = a->nn_act_GetPersistentIdEx(slot);
+                sendall(client, &persistentId, 4);
+                a->nn_act_Finalize();
+            }
         }
 
         CHECK_SOCKET(a->SOClose(client), "SOClose")
@@ -1018,6 +1092,8 @@ int _main(int argc, char *argv[]) {
 	Acquire(coreinit)
 	Acquire(nsysnet)
 	Acquire(vpad)
+	Acquire(nn_save)
+	Acquire(nn_act)
 
 	Import(coreinit, OSDynLoad_GetModuleName)
 
@@ -1065,6 +1141,9 @@ int _main(int argc, char *argv[]) {
     Import(coreinit, FSOpenDir)
     Import(coreinit, FSReadDir)
     Import(coreinit, FSCloseDir)
+
+    Import(nn_save, SAVEInit)
+    Import(nn_save, SAVEOpenFile)
 	
 	Import2(nsysnet, socket_lib_init, SOInit)
 	Import2(nsysnet, socket, SOSocket)
@@ -1080,11 +1159,17 @@ int _main(int argc, char *argv[]) {
 
 	Import(vpad, VPADRead)
 
+	Import2(nn_act, Initialize__Q2_2nn3actFv, nn_act_Initialize)
+	Import2(nn_act, Finalize__Q2_2nn3actFv, nn_act_Finalize)
+	Import2(nn_act, GetSlotNo__Q2_2nn3actFv, nn_act_GetSlotNo)
+	Import2(nn_act, GetPersistentIdEx__Q2_2nn3actFUc, nn_act_GetPersistentIdEx)
+
     a.connection = false;
     a.stepState = STEP_STATE_RUNNING;
     GLOBALS = &a;
 
     a.FSInit();
+    a.SAVEInit();
     a.FSInitCmdBlock(&a.fileBlock);
     a.FSAddClient(&a.fileClient, -1);
 
@@ -1095,7 +1180,7 @@ int _main(int argc, char *argv[]) {
 		&a.thread,
 		RPCServer,
 		0,
-		&a,
+		0,
 		a.stack + STACK_SIZE,
 		STACK_SIZE,
 		0,
@@ -1110,6 +1195,14 @@ int _main(int argc, char *argv[]) {
 
     //Patch the OSIsDebuggerInitialized call
     WriteCode((u32)entryPoint + 0x28, 0x38600001); //li r3, 1
+
+    //nn_save.rpl is loaded somewhere after the game's rpx. This is too far
+    //away from our own code to be patched with a normal branch instruction,
+    //so we have to use a bctr instruction.
+	WriteCode((u32)a.SAVEOpenFile + 0x1C, 0x3D80011D); //lis r12, (0x011DD01C)@h
+	WriteCode((u32)a.SAVEOpenFile + 0x20, 0x618CD01C); //ori r12, r12, (0x011DD01C)@l
+	WriteCode((u32)a.SAVEOpenFile + 0x24, 0x7D8903A6); //mtctr r12
+	WriteCode((u32)a.SAVEOpenFile + 0x28, 0x4E800420); //bctr
 
 	return main(argc, argv);
 }

@@ -18,11 +18,14 @@ return_\name:
     ba \name + \returnOffs
 .endm
 
+#FS functions are always at the same address, so we
+#can simply define constants for their addresses
+#This is not possible with SAVE functions
 .set FSGetStat, 0x01070810
 .set FSOpenFile, 0x0106F9C4
-.set FSCloseFile, 0x0106FAD0
 .set FSReadFile, 0x0106FB50
 .set FSWriteFile, 0x0106FC70
+.set FSCloseFile, 0x0106FAD0
 .set FSSetPosFile, 0x0106FF78
 .set FSGetStatFile, 0x0106FFE8
 
@@ -34,6 +37,8 @@ _start:
     b CloseFile
     b SetPosFile
     b GetStatFile
+    b OpenSaveFile
+    b WriteFile
 
 GetStat:
     mr r29, r3  #The patched instruction
@@ -47,6 +52,10 @@ ReadFile:
     mr r30, r4
     patch FSReadFile, 0xC, 0x34, 0x78
 
+WriteFile:
+    mr r30, r4
+    patch FSWriteFile, 0xC, 0x34, 0x78
+
 CloseFile:
     mr r29, r3
     patch FSCloseFile, 8, 0x30, 0x60
@@ -58,3 +67,15 @@ SetPosFile:
 GetStatFile:
     mr r29, r3
     patch FSGetStatFile, 8, 0x28, 0x5C
+
+OpenSaveFile:
+    mr r22, r3          #The
+    mflr r0             #patched
+    stw r0, 0x54(r1)    #instructions
+    mr r29, r9
+
+    bl Patch_SAVEOpenFile
+    mtlr r3     #Patch_SAVEOpenFile returns the address
+                #where execution should be continued
+    li r3, 0    #Return OK
+    blr

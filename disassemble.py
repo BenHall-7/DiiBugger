@@ -227,7 +227,7 @@ def rlwinm(value, addr):
     if SH == 0 and MB == 0:
         return "clrrwi%s" %dot, "r%i, r%i, %i" %(A, S, 31 - ME)
     #clrlslwi
-    return "rlwinm%s" %dot, "r%i, r%i, r%i,r%i,r%i" %(A, S, SH, MB, ME)
+    return "rlwinm%s" %dot, "r%i, r%i, %i,%i,%i" %(A, S, SH, MB, ME)
 
 def sc(value, addr):
     if value & 0x3FFFFFF != 2:

@@ -17,6 +17,7 @@ class Message:
     CloseFile = 6
     SetPosFile = 7
     GetStatFile = 8
+    WriteFile = 9
 
     Continue = 0
     Step = 1
@@ -38,8 +39,8 @@ events = EventHolder()
 
 
 #I don't want to deal with the whole threading trouble to complete big
-#file transfers without the UI becoming unresponsive. There probably is
-#a better way to code this, but this is what I came up with.
+#file transfers without the UI becoming unresponsive. There may be a
+#better way to code this, but this is what I came up with.
 class TaskMgr:
     def __init__(self):
         self.taskQueue = []
@@ -139,6 +140,7 @@ class PyBugger:
         self.breakPoints = []
 
         self.basePath = b""
+        self.patchList = []
         self.currentHandle = 0x12345678
         self.files = {}
 
@@ -149,9 +151,10 @@ class PyBugger:
             Message.GetStat: self.handleGetStat,
             Message.OpenFile: self.handleOpenFile,
             Message.ReadFile: self.handleReadFile,
+            Message.WriteFile: self.handleWriteFile,
             Message.CloseFile: self.handleCloseFile,
             Message.SetPosFile: self.handleSetPosFile,
-            Message.GetStatFile: self.handleGetStatFile
+            Message.GetStatFile: self.handleGetStatFile,
         }
 
     def handleException(self, msg):
@@ -169,7 +172,14 @@ class PyBugger:
         path = msg.data.decode("ascii")
         print("Open: %s" %path)
 
-        f = open(os.path.join(self.basePath, path.strip("/vol")), mode)
+        fullPath = os.path.join(self.basePath, path.strip("/vol"))
+        if mode[0] == "w":
+            os.makedirs(os.path.dirname(fullPath), exist_ok=True)
+            if path not in self.patchList:
+                self.patchList.append(path)
+                self.setPatchFiles(self.patchList, self.basePath)
+
+        f = open(fullPath, mode)
         self.files[self.currentHandle] = f
         self.sendFileMessage(self.currentHandle)
         self.currentHandle += 1
@@ -185,13 +195,31 @@ class PyBugger:
         bytesSent = 0
         while bytesSent < len(data):
             length = min(len(data) - bytesSent, 0x8000)
-            self.sendall(b"\x03")
-            self.sendall(struct.pack(">II", bufferAddr, length))
-            self.sendall(data[bytesSent : bytesSent + length])
+            self.write(bufferAddr, data[bytesSent : bytesSent + length])
             bufferAddr += length
             bytesSent += length
             task.update(bytesSent)
         self.sendFileMessage(bytesSent // size)
+        task.end()
+
+    def handleWriteFile(self, msg):
+        print("Write")
+        task = Task(blocking=False, cancelable=False)
+        bufferAddr, size, count, handle = struct.unpack(">IIII", msg.data)
+
+        task.setInfo("Writing file", size * count)
+
+        data = b""
+        bytes = 0
+        while bytes < size * count:
+            length = min(size * count - bytes, 0x8000)
+            data += self.read(bufferAddr, length)
+            bufferAddr += length
+            bytes += length
+            task.update(bytes)
+
+        self.files[handle].write(data)
+        self.sendFileMessage(count)
         task.end()
 
     def handleCloseFile(self, msg):
@@ -350,6 +378,7 @@ class PyBugger:
 
     def setPatchFiles(self, fileList, basePath):
         self.basePath = basePath
+        self.patchList = fileList
         self.sendall(b"\x0E")
 
         fileBuffer = struct.pack(">I", len(fileList))
@@ -362,6 +391,10 @@ class PyBugger:
 
     def clearPatchFiles(self):
         self.sendall(b"\x10")
+
+    def getAccountId(self):
+        self.sendall(b"\x11")
+        return struct.unpack(">I", self.recvall(4))[0]
 
     def sendall(self, data):
         try:
@@ -633,7 +666,7 @@ class DisassemblyWidget(QTextEdit):
         if addr == self.currentInstruction:
             colors.append((0, 255, 0))
         if addr == self.selectedAddress:
-            colors.append((0, 0, 255))
+            colors.append((128, 128, 255))
 
         if not colors:
             return None
@@ -984,7 +1017,7 @@ def formatFileSize(size):
     return "%i B" %size
 
 class FileTreeNode(QTreeWidgetItem):
-    def __init__(self, parent, name, size, path):
+    def __init__(self, parent, name, size, path, dumpable=True):
         super().__init__(parent)
         self.name = name
         self.size = size
@@ -992,7 +1025,7 @@ class FileTreeNode(QTreeWidgetItem):
 
         self.setText(0, name)
         if size == -1: #It's a folder
-            self.loaded = False
+            self.loaded = not dumpable
         else: #It's a file
             self.setText(1, formatFileSize(size))
             self.loaded = True
@@ -1037,8 +1070,14 @@ class FileTreeWidget(QTreeWidget):
 
     def initFileTree(self):
         self.clear()
-        rootItem = FileTreeNode(self, "content", -1, "/vol/content")
-        rootItem.loadContent()
+        account = bugger.getAccountId()
+
+        rootItem = FileTreeNode(self, "vol", -1, "/vol", dumpable=False)
+        saveItem = FileTreeNode(rootItem, "save", -1, "/vol/save", dumpable=False)
+
+        FileTreeNode(rootItem, "content", -1, "/vol/content").loadContent()
+        FileTreeNode(saveItem, "common", -1, "/vol/save/common").loadContent()
+        FileTreeNode(saveItem, "%08X" %account, -1, "/vol/save/%08X" %account).loadContent()
         self.resizeColumnToContents(0)
 
     def handleItemExpanded(self, item):
@@ -1067,6 +1106,8 @@ class FileSystemTab(QWidget):
         self.layout.addLayout(hlayout)
         self.setLayout(self.layout)
 
+        events.Closed.connect(self.handleClose)
+
     def dump(self):
         item = self.fileTree.currentItem()
         if item:
@@ -1091,6 +1132,9 @@ class FileSystemTab(QWidget):
 
     def clearPatch(self):
         bugger.clearPatchFiles()
+        self.clearButton.setEnabled(False)
+
+    def handleClose(self):
         self.clearButton.setEnabled(False)
 
 

@@ -9,6 +9,7 @@
 #define FSOpenFile 0x0106F9C4
 #define FSCloseFile 0x0106FAD0
 #define FSReadFile 0x0106FB50
+#define FSWriteFile 0x0106FC70
 #define FSSetPosFile 0x0106FF78
 #define FSGetStatFile 0x0106FFE8
 
@@ -112,6 +113,9 @@ void _main() {
         insertBranch(FSCloseFile + 0x2C, INSTALL_ADDR + 16, DCFlushRange, ICInvalidateRange);
         insertBranch(FSSetPosFile + 0x24, INSTALL_ADDR + 20, DCFlushRange, ICInvalidateRange);
         insertBranch(FSGetStatFile + 0x24, INSTALL_ADDR + 24, DCFlushRange, ICInvalidateRange);
+        insertBranch(FSWriteFile + 0x30, INSTALL_ADDR + 32, DCFlushRange, ICInvalidateRange);
+        //SAVEOpenFile is in nn_save.rpl, which is loaded along with the game.
+        //Therefore, I'm patching it when a game is launched in server.cpp
 
         //Disable OSSetExceptionCallback because DKC: TF will
         //overwrite our own exception handlers otherwise
