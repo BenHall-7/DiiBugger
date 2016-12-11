@@ -27,6 +27,7 @@ return_\name:
 .set FSWriteFile, 0x0106FC70
 .set FSCloseFile, 0x0106FAD0
 .set FSSetPosFile, 0x0106FF78
+.set FSReadFileWithPos, 0x0106FBDC
 .set FSGetStatFile, 0x0106FFE8
 
 _start:
@@ -39,6 +40,7 @@ _start:
     b GetStatFile
     b OpenSaveFile
     b WriteFile
+    b ReadFileWithPos
 
 GetStat:
     mr r29, r3  #The patched instruction
@@ -63,6 +65,10 @@ CloseFile:
 SetPosFile:
     mr r29, r3
     patch FSSetPosFile, 8, 0x28, 0x5C
+
+ReadFileWithPos:
+    mr r30, r4
+    patch FSReadFileWithPos, 0x10, 0x38, 0x80
 
 GetStatFile:
     mr r29, r3

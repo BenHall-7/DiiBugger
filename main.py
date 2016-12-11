@@ -154,7 +154,7 @@ class PyBugger:
             Message.WriteFile: self.handleWriteFile,
             Message.CloseFile: self.handleCloseFile,
             Message.SetPosFile: self.handleSetPosFile,
-            Message.GetStatFile: self.handleGetStatFile,
+            Message.GetStatFile: self.handleGetStatFile
         }
 
     def handleException(self, msg):
@@ -163,7 +163,7 @@ class PyBugger:
 
     def handleGetStat(self, msg):
         gamePath = msg.data.decode("ascii")
-        path = os.path.join(self.basePath, gamePath.strip("/vol"))
+        path = os.path.join(self.basePath, gamePath.lstrip("/vol"))
         print("GetStat: %s" %gamePath)
         self.sendFileMessage(os.path.getsize(path))
 
@@ -172,7 +172,7 @@ class PyBugger:
         path = msg.data.decode("ascii")
         print("Open: %s" %path)
 
-        fullPath = os.path.join(self.basePath, path.strip("/vol"))
+        fullPath = os.path.join(self.basePath, path.lstrip("/vol"))
         if mode[0] == "w":
             os.makedirs(os.path.dirname(fullPath), exist_ok=True)
             if path not in self.patchList:
@@ -1017,7 +1017,7 @@ def formatFileSize(size):
     return "%i B" %size
 
 class FileTreeNode(QTreeWidgetItem):
-    def __init__(self, parent, name, size, path, dumpable=True):
+    def __init__(self, parent, name, size, path, manualLoad=False):
         super().__init__(parent)
         self.name = name
         self.size = size
@@ -1025,7 +1025,7 @@ class FileTreeNode(QTreeWidgetItem):
 
         self.setText(0, name)
         if size == -1: #It's a folder
-            self.loaded = not dumpable
+            self.loaded = manualLoad
         else: #It's a file
             self.setText(1, formatFileSize(size))
             self.loaded = True
@@ -1072,8 +1072,8 @@ class FileTreeWidget(QTreeWidget):
         self.clear()
         account = bugger.getAccountId()
 
-        rootItem = FileTreeNode(self, "vol", -1, "/vol", dumpable=False)
-        saveItem = FileTreeNode(rootItem, "save", -1, "/vol/save", dumpable=False)
+        rootItem = FileTreeNode(self, "vol", -1, "/vol", manualLoad=True)
+        saveItem = FileTreeNode(rootItem, "save", -1, "/vol/save", manualLoad=True)
 
         FileTreeNode(rootItem, "content", -1, "/vol/content").loadContent()
         FileTreeNode(saveItem, "common", -1, "/vol/save/common").loadContent()

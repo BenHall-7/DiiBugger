@@ -52,6 +52,8 @@ extern int (* const entryPoint)(int argc, char *argv[]);
 
 #define STACK_SIZE 0x8000
 #define MESSAGE_COUNT 4
+#define NUM_FILE_HANDLES 4
+
 #define GLOBALS (*(globals **)0x10000000)
 #define TRAP 0x7FE00008
 #define STEP1 10
@@ -108,7 +110,7 @@ struct globals {
     FSCmdBlock fileBlock;
     FSClient fileClient;
     char *patchFiles;
-    int fileHandle;
+    int fileHandles[NUM_FILE_HANDLES];
 
     char stack[STACK_SIZE];
 
@@ -159,6 +161,7 @@ struct globals {
     Declare(FSOpenDir)
     Declare(FSReadDir)
     Declare(FSCloseDir)
+    Declare(FSGetCwd)
 
     Declare(SAVEInit)
     Declare(SAVEOpenFile)
@@ -267,17 +270,26 @@ bool IsServerFile(const char *path) {
     return false;
 }
 
-void CheckFileHandle() {
-    if (GLOBALS->fileHandle != 0) {
-        GLOBALS->OSFatal("The game tried to open two patched files at the same time.\n"
-                   "However, the current debugger implementation only allows\n"
-                   "one patched file to be opened at once.");
+int *GetServerHandle(int handle) {
+    for (int i = 0; i < NUM_FILE_HANDLES; i++) {
+        if (GLOBALS->fileHandles[i] == handle) {
+            return &GLOBALS->fileHandles[i];
+        }
     }
+    return 0;
+}
+
+int *GetFreeFileHandle() {
+    int *handle = GetServerHandle(0);
+    if (!handle) {
+        GLOBALS->OSFatal("All file handles occupied\n");
+    }
+    return handle;
 }
 
 void OpenServerFile(const char *path, const char *mode, int *handle) {
     globals *a = GLOBALS;
-    CheckFileHandle();
+    int *serverHandle = GetFreeFileHandle();
 
     OSMessage message;
     message.message = SERVER_MESSAGE_OPEN_FILE;
@@ -286,8 +298,8 @@ void OpenServerFile(const char *path, const char *mode, int *handle) {
     message.data2 = *(u16 *)mode; //A bit of a hack
     a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
     a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+    *serverHandle = message.data0;
     *handle = message.data0;
-    a->fileHandle = message.data0;
 }
 
 u32 GetPersistentId(u8 slot) {
@@ -313,6 +325,31 @@ int OpenSaveFile(FSClient *client, u8 account, const char *path, const char *mod
     return 0;
 }
 
+void SetServerFilePos(int handle, u32 pos) {
+    globals *a = GLOBALS;
+
+    u32 args[] = {handle, pos};
+    OSMessage message;
+    message.message = SERVER_MESSAGE_SET_POS_FILE;
+    message.data0 = (u32)args;
+    message.data1 = 8;
+    a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
+    a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+}
+
+int ReadServerFile(void *buffer, u32 size, u32 count, int handle) {
+    globals *a = GLOBALS;
+
+    u32 readArgs[] = {(u32)buffer, size, count, handle};
+    OSMessage message;
+    message.message = SERVER_MESSAGE_READ_FILE;
+    message.data0 = (u32)readArgs;
+    message.data1 = 0x10;
+    a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
+    a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+    return message.data0;
+}
+
 extern "C" {
 
     int Patch_FSGetStat(FSClient *client, FSCmdBlock *block, const char *path, FSStat *stat, int errHandling) {
@@ -332,6 +369,20 @@ extern "C" {
 
     int Patch_FSOpenFile(FSClient *client, FSCmdBlock *block, const char *path, const char *mode, int *handle, int errHandling) {
         INIT_FS_PATCH
+        if (path[0] != '/') {
+            char workPath[640] = {0};
+            a->FSGetCwd(client, block, workPath, 640, -1);
+
+            u32 length = strlen(workPath);
+            if (workPath[length - 1] == '/') {
+                workPath[length - 1] = '\x00';
+            }
+
+            char newPath[640] = {0};
+            a->__os_snprintf(newPath, 640, "%s/%s", workPath, path);
+            path = newPath;
+        }
+
         if (!(IsServerFile(path) || mode[0] == 'w')) return -1;
         OpenServerFile(path, mode, handle);
         return 0;
@@ -350,21 +401,21 @@ extern "C" {
 
     int Patch_FSReadFile(FSClient *client, FSCmdBlock *block, void *buffer, u32 size, u32 count, int handle, u32 flags, int errHandling) {
         INIT_FS_PATCH
-        if (handle != a->fileHandle) return -1;
+        if (!GetServerHandle(handle)) return -1;
+        return ReadServerFile(buffer, size, count, handle);
+    }
 
-        u32 readArgs[] = {(u32)buffer, size, count, handle};
-        OSMessage message;
-        message.message = SERVER_MESSAGE_READ_FILE;
-        message.data0 = (u32)readArgs;
-        message.data1 = 0x10;
-        a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
-        a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
-        return message.data0;
+    int Patch_FSReadFileWithPos(FSClient *client, FSCmdBlock *block, void *buffer, u32 size,
+                                u32 count, u32 pos, int handle, u32 flags, int errHandling) {
+        INIT_FS_PATCH
+        if (!GetServerHandle(handle)) return -1;
+        SetServerFilePos(handle, pos);
+        return ReadServerFile(buffer, size, count, handle);
     }
 
     int Patch_FSWriteFile(FSClient *client, FSCmdBlock *block, void *buffer, u32 size, u32 count, int handle, u32 flags, int errHandling) {
         INIT_FS_PATCH
-        if (handle != a->fileHandle) return -1;
+        if (!GetServerHandle(handle)) return -1;
 
         u32 writeArgs[] = {(u32)buffer, size, count, handle};
         OSMessage message;
@@ -378,7 +429,8 @@ extern "C" {
 
     int Patch_FSCloseFile(FSClient *client, FSCmdBlock *block, int handle, int errHandling) {
         INIT_FS_PATCH
-        if (handle != a->fileHandle) return -1;
+        int *serverHandle = GetServerHandle(handle);
+        if (!serverHandle) return -1;
 
         OSMessage message;
         message.message = SERVER_MESSAGE_CLOSE_FILE;
@@ -387,27 +439,20 @@ extern "C" {
         message.data2 = handle;
         a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
         a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
-        a->fileHandle = 0;
+        *serverHandle = 0;
         return 0;
     }
 
     int Patch_FSSetPosFile(FSClient *client, FSCmdBlock *block, int handle, u32 pos, int errHandling) {
         INIT_FS_PATCH
-        if (handle != a->fileHandle) return -1;
-
-        u32 args[] = {handle, pos};
-        OSMessage message;
-        message.message = SERVER_MESSAGE_SET_POS_FILE;
-        message.data0 = 8;
-        message.data1 = (u32)args;
-        a->OSSendMessage(&a->serverQueue, &message, OS_MESSAGE_BLOCK);
-        a->OSReceiveMessage(&a->fileQueue, &message, OS_MESSAGE_BLOCK);
+        if (!GetServerHandle(handle)) return -1;
+        SetServerFilePos(handle, pos);
         return 0;
     }
 
     int Patch_FSGetStatFile(FSClient *client, FSCmdBlock *block, int handle, FSStat *stat, int errHandling) {
         INIT_FS_PATCH
-        if (handle != a->fileHandle) return -1;
+        if (!GetServerHandle(handle)) return -1;
 
         OSMessage message;
         message.message = SERVER_MESSAGE_GET_STAT_FILE;
@@ -1141,6 +1186,7 @@ int _main(int argc, char *argv[]) {
     Import(coreinit, FSOpenDir)
     Import(coreinit, FSReadDir)
     Import(coreinit, FSCloseDir)
+    Import(coreinit, FSGetCwd)
 
     Import(nn_save, SAVEInit)
     Import(nn_save, SAVEOpenFile)

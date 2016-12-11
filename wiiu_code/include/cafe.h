@@ -194,6 +194,7 @@ typedef int (*FSGetStatFile_t)(FSClient *client, FSCmdBlock *block, int handle, 
 typedef int (*FSOpenDir_t)(FSClient *client, FSCmdBlock *block, const char *path, int *handle, int errHandling);
 typedef int (*FSReadDir_t)(FSClient *client, FSCmdBlock *block, int handle, FSDirEntry *entry, int errHandling);
 typedef int (*FSCloseDir_t)(FSClient *client, FSCmdBlock *block, int handle, int errHandling);
+typedef int (*FSGetCwd_t)(FSClient *client, FSCmdBlock *block, char *path, u32 length, int errHandling);
 
 typedef int (*SAVEInit_t)();
 typedef int (*SAVEOpenFile_t)(FSClient *client, FSCmdBlock *block, u8 account, const char *path, const char *mode, int *handle, int errHandling);
